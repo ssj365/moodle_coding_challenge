@@ -1,5 +1,8 @@
 #!/usr/bin/php
 <?php
+
+declare(strict_types=1);
+
 /**
  * Postgres Database User Upload script.
  */
@@ -73,7 +76,28 @@ function retrieve_parsed_arguments(): array {
  * @param array $options The parsed options containing database connection info.
  */
 function create_users_table(array $options): void {
-    echo "Creating or rebuilding the users table in the database...\n";
+    // Check DB options for username, password, and host.
+    if (!valid_db_options($options)) {
+        echo "Error: Missing database connection options (-u, -p, -h are required).\n";
+        exit(1);
+    }
+
+    $pdo = db_connect($options);
+    $sql = "DROP TABLE IF EXISTS users;
+            CREATE TABLE users (
+                name VARCHAR(255) NOT NULL,
+                surname VARCHAR(255) NOT NULL,
+                email VARCHAR(255) NOT NULL UNIQUE
+            );";
+
+    try {
+        $pdo->exec($sql);
+    } catch (PDOException $e) {
+        echo "Error: Failed to create users table: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+
+    echo "Users table created successfully.\n";
 }
 
 /**
@@ -84,14 +108,15 @@ function create_users_table(array $options): void {
 function process_csv_file(array $options): void {
     $filename = $options['file'];
 
-    if (!is_file($filename) || !is_readable($filename) || strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'csv') {
+    if (!is_file($filename) || !is_readable($filename) ||
+        strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'csv') {
         echo "Error: File '{$filename}' is not a readable CSV file. Check CSV file exists and has the correct permissions.\n";
         exit(1);
     }
 
-    //Check DB options for username, password, and host.
-    if (!valid_db_options($options) || !check_db_exists()) {
-        echo "Error: Missing or incorrect database connection information. Check that the database exists and the connection information provided is correct.\n";
+    // Check DB options for username, password, and host.
+    if (!valid_db_options($options)) {
+        echo "Error: Missing database connection options (-u, -p, -h are required).\n";
         exit(1);
     }
 
@@ -128,8 +153,19 @@ function normalize_csv_data(string $filename): array {
 
     // Read and validate the header row.
     $header = fgetcsv($file);
+    if ($header === false) {
+        echo "Error: CSV file is empty or unreadable.\n";
+        fclose($file);
+        exit(1);
+    }
     $header = array_map(fn($col) => strtolower(trim($col)), $header);
-    if ($header !== ['name', 'surname', 'email']) {
+
+    // Find the column indexes for name, surname, and email.
+    $nameheader = array_search('name', $header);
+    $surnameheader = array_search('surname', $header);
+    $emailheader = array_search('email', $header);
+
+    if ($nameheader === false || $surnameheader === false || $emailheader === false) {
         echo "Error: CSV header must contain 'name', 'surname', 'email'.\n";
         fclose($file);
         exit(1);
@@ -137,17 +173,18 @@ function normalize_csv_data(string $filename): array {
 
     // Read and normalize each row.
     $rows = [];
+    $expectedcols = count($header);
     while (($row = fgetcsv($file)) !== false) {
-        if (count($row) !== 3) {
+        if (count($row) !== $expectedcols) {
             continue;
         }
-        $name = ucwords(strtolower(trim($row[0])));
-        $surname = ucwords(strtolower(trim($row[1])));
-        $email = strtolower(trim($row[2]));
+        $name = ucwords(strtolower(trim($row[$nameheader])), " \t\r\n\f\v-'");
+        $surname = ucwords(strtolower(trim($row[$surnameheader])), " \t\r\n\f\v-'");
+        $email = strtolower(trim($row[$emailheader]));
 
         // Validate the email address.
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            echo "Error: Invalid email '{$email}' for {$name} {$surname} — skipping.\n";
+            echo "Invalid email '{$email}' for {$name} {$surname} — skipping.\n";
             continue;
         }
 
@@ -163,13 +200,22 @@ function normalize_csv_data(string $filename): array {
 }
 
 /**
- * Check if the database exists and is accessible.
+ * Connect to the PostgreSQL database.
  *
- * @return bool True if the database exists, false otherwise.
+ * @param array $options The database connection options (u, p, h).
+ * @return PDO The database connection.
  */
-function check_db_exists(): bool {
-    // Check if the database exists and is accessible.
-    return true;
+function db_connect(array $options): PDO {
+    $dsn = sprintf("pgsql:host=%s", $options['h']);
+
+    try {
+        return new PDO($dsn, $options['u'], $options['p'], [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        ]);
+    } catch (PDOException $e) {
+        echo "Error: Unable to connect to PostgreSQL. Check your connection details.\n";
+        exit(1);
+    }
 }
 
 /**
@@ -179,14 +225,44 @@ function check_db_exists(): bool {
  * @param array $dboptions The database connection options.
  */
 function add_to_database(array $filedata, array $dboptions): void {
-    // Add the normalized data to the database using the provided connection options.
-    echo "Inserting data into the database...\n";
+    $pdo = db_connect($dboptions);
+
+    $inserted = 0;
+    $skipped = 0;
+
+    $sql = $pdo->prepare(
+        'INSERT INTO users (name, surname, email) VALUES (:name, :surname, :email) ON CONFLICT (email) DO NOTHING'
+    );
+
+    foreach ($filedata as $row) {
+        try {
+            $sql->execute([
+                ':name' => $row['name'],
+                ':surname' => $row['surname'],
+                ':email' => $row['email'],
+            ]);
+        } catch (PDOException $e) {
+            echo "Error inserting '{$row['name']} {$row['surname']}': " . $e->getMessage() . "\n";
+            $skipped++;
+            continue;
+        }
+
+        if ($sql->rowCount() === 0) {
+            echo "Skipped duplicate email: {$row['email']}\n";
+            $skipped++;
+            continue;
+        }
+        $inserted++;
+    }
+
+    echo "Insert complete: {$inserted} inserted, {$skipped} skipped.\n";
 }
 
 /**
  * Verify that the database connection options are valid.
  *
  * @param array $options The parsed options containing database connection info.
+ * @return bool True if options are valid, false otherwise.
  */
 function valid_db_options(array $options): bool {
     // Verify that the database connection options are valid.
