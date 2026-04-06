@@ -25,7 +25,7 @@ Options:
 Examples:
     php user_upload.php --create_table -u dbuser -p dbpass -h localhost
     php user_upload.php --file users.csv -u dbuser -p dbpass -h localhost
-    php user_upload.php --file users.csv -u dbuser -p dbpass -h localhost --dry_run
+    php user_upload.php --file users.csv --dry_run
 ";
 
 $options = retrieve_parsed_arguments();
@@ -35,15 +35,19 @@ if ($options['help']) {
     exit(0);
 }
 
-if ($options['create_table']) {
-    create_users_table($options);
-    exit(0);
-}
+try {
+    if ($options['create_table']) {
+        create_users_table($options);
+        exit(0); // No further action after this directive.
+    }
 
-if (!empty($options['file'])) {
-    process_csv_file($options);
-    exit(0);
-} 
+    if (!empty($options['file'])) {
+        process_csv_file($options);
+    }
+} catch (Exception $e) {
+    fwrite(STDERR, $e->getMessage() . PHP_EOL);
+    exit(1);
+}
 
 exit(0);
 
@@ -53,7 +57,6 @@ exit(0);
  * @return array Options from the command line.
  */
 function retrieve_parsed_arguments(): array {
-
     // Parse known options from the command line.
     $parsed = getopt('u:p:h:', ['help', 'file:', 'create_table', 'dry_run']);
 
@@ -78,30 +81,24 @@ function retrieve_parsed_arguments(): array {
 function create_users_table(array $options): void {
     // Check DB options for username, password, and host.
     if (!valid_db_options($options)) {
-        echo "Error: Missing database connection options (-u, -p, -h are required).\n";
-        exit(1);
+        throw new Exception("Error: Missing database connection options (-u, -p, -h are required).");
     }
 
     $pdo = db_connect($options);
-    $sql = "DROP TABLE IF EXISTS users;
+    $query = "DROP TABLE IF EXISTS users;
             CREATE TABLE users (
                 name VARCHAR(255) NOT NULL,
                 surname VARCHAR(255) NOT NULL,
                 email VARCHAR(255) NOT NULL UNIQUE
             );";
 
-    try {
-        $pdo->exec($sql);
-    } catch (PDOException $e) {
-        echo "Error: Failed to create users table: " . $e->getMessage() . "\n";
-        exit(1);
-    }
+    $pdo->exec($query);
 
     echo "Users table created successfully.\n";
 }
 
 /**
- * Process the CSV file and insert valid rows into the database.
+ * Process the CSV file and pass valid rows for database insertion or dry run.
  *
  * @param array $options The parsed options containing file and database info.
  */
@@ -110,32 +107,13 @@ function process_csv_file(array $options): void {
 
     if (!is_file($filename) || !is_readable($filename) ||
         strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'csv') {
-        echo "Error: File '{$filename}' is not a readable CSV file. Check CSV file exists and has the correct permissions.\n";
-        exit(1);
-    }
-
-    // Check DB options for username, password, and host.
-    if (!valid_db_options($options)) {
-        echo "Error: Missing database connection options (-u, -p, -h are required).\n";
-        exit(1);
+        throw new Exception("Error: File '{$filename}' is not a readable CSV file. Check CSV file exists and has the correct permissions.");
     }
 
     // Before processing, normalize the names and emails.
     $filedata = normalize_csv_data($filename);
 
-    // Insert the data into the database, unless it's a dry run.
-    if ($options['dry_run']) {
-        echo "Dry run mode: No changes will be made to the database. Data to be inserted:\n";
-        print_r($filedata);
-        exit(0);
-    }
-    $dboptions = [
-        'u' => $options['u'],
-        'p' => $options['p'],
-        'h' => $options['h'],
-    ];
-    add_to_database($filedata, $dboptions);
-    return;
+    process_user_data($filedata, $options);
 }
 
 /**
@@ -147,40 +125,37 @@ function process_csv_file(array $options): void {
 function normalize_csv_data(string $filename): array {
     $file = fopen($filename, 'r');
     if ($file === false) {
-        echo "Error: Unable to open file '{$filename}'.\n";
-        exit(1);
+        throw new Exception("Error: Unable to open file '{$filename}'.");
     }
 
     // Read and validate the header row.
     $header = fgetcsv($file);
     if ($header === false) {
-        echo "Error: CSV file is empty or unreadable.\n";
         fclose($file);
-        exit(1);
+        throw new Exception("Error: CSV file is empty or unreadable.");
     }
     $header = array_map(fn($col) => strtolower(trim($col)), $header);
-
-    // Find the column indexes for name, surname, and email.
-    $nameheader = array_search('name', $header);
-    $surnameheader = array_search('surname', $header);
-    $emailheader = array_search('email', $header);
-
-    if ($nameheader === false || $surnameheader === false || $emailheader === false) {
-        echo "Error: CSV header must contain 'name', 'surname', 'email'.\n";
+    if ($header !== ['name', 'surname', 'email']) {
         fclose($file);
-        exit(1);
+        throw new Exception("Error: CSV header must contain 'name', 'surname', 'email'.");
     }
 
     // Read and normalize each row.
     $rows = [];
-    $expectedcols = count($header);
     while (($row = fgetcsv($file)) !== false) {
-        if (count($row) !== $expectedcols) {
+        if (count($row) !== 3) {
+            echo "Malformed row — skipping.\n";
             continue;
         }
-        $name = ucwords(strtolower(trim($row[$nameheader])), " \t\r\n\f\v-'");
-        $surname = ucwords(strtolower(trim($row[$surnameheader])), " \t\r\n\f\v-'");
-        $email = strtolower(trim($row[$emailheader]));
+        $name = ucwords(strtolower(trim($row[0])), " \t\r\n\f\v-'");
+        $surname = ucwords(strtolower(trim($row[1])), " \t\r\n\f\v-'");
+        $email = strtolower(trim($row[2]));
+
+        // Skip rows with empty name, surname, or email.
+        if ($name === '' || $surname === '' || $email === '') {
+            echo "Incomplete row — skipping.\n";
+            continue;
+        }
 
         // Validate the email address.
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -208,54 +183,81 @@ function normalize_csv_data(string $filename): array {
 function db_connect(array $options): PDO {
     $dsn = sprintf("pgsql:host=%s", $options['h']);
 
-    try {
-        return new PDO($dsn, $options['u'], $options['p'], [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        ]);
-    } catch (PDOException $e) {
-        echo "Error: Unable to connect to PostgreSQL. Check your connection details.\n";
-        exit(1);
-    }
+    return new PDO($dsn, $options['u'], $options['p'], [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ]);
 }
 
 /**
- * Add the normalized data to the database.
+ * Process user data by inserting into the database, or displaying in dry run mode.
  *
  * @param array $filedata The normalized data from the CSV file.
- * @param array $dboptions The database connection options.
+ * @param array $options The parsed options containing database and dry run info.
  */
-function add_to_database(array $filedata, array $dboptions): void {
-    $pdo = db_connect($dboptions);
+function process_user_data(array $filedata, array $options): void {
+    if ($options['dry_run']) {
+        echo "Dry run mode: No changes will be made to the database.\n";
+        foreach ($filedata as $row) {
+            echo "{$row['name']} {$row['surname']} ({$row['email']})\n";
+        }
+        echo "Dry run complete: " . count($filedata) . " rows to be inserted.\n";
+        return;
+    }
 
-    $inserted = 0;
-    $skipped = 0;
+    // Check DB options for username, password, and host.
+    if (!valid_db_options($options)) {
+        throw new Exception("Error: Missing database connection options (-u, -p, -h are required).");
+    }
+
+    $pdo = db_connect($options);
+
+    // Verify the users table exists before inserting.
+    $pdo->query('SELECT 1 FROM users LIMIT 1');
 
     $sql = $pdo->prepare(
         'INSERT INTO users (name, surname, email) VALUES (:name, :surname, :email) ON CONFLICT (email) DO NOTHING'
     );
 
-    foreach ($filedata as $row) {
-        try {
-            $sql->execute([
-                ':name' => $row['name'],
-                ':surname' => $row['surname'],
-                ':email' => $row['email'],
-            ]);
-        } catch (PDOException $e) {
-            echo "Error inserting '{$row['name']} {$row['surname']}': " . $e->getMessage() . "\n";
-            $skipped++;
-            continue;
-        }
+    $inserted = 0;
 
-        if ($sql->rowCount() === 0) {
-            echo "Skipped duplicate email: {$row['email']}\n";
-            $skipped++;
-            continue;
+    // Since the user list could be large, use a transaction.
+    $pdo->beginTransaction();
+    foreach ($filedata as $row) {
+        if (insert_row($sql, $row)) {
+            $inserted++;
         }
-        $inserted++;
+    }
+    $pdo->commit();
+
+    $skipped = count($filedata) - $inserted;
+    echo "Insert complete: {$inserted} inserted, {$skipped} skipped.\n";
+}
+
+/**
+ * Insert a single row into the users table.
+ *
+ * @param PDOStatement $sql The prepared insert statement.
+ * @param array $row The row data containing name, surname, email.
+ * @return bool True if the row was inserted, false if skipped or errored.
+ */
+function insert_row(PDOStatement $sql, array $row): bool {
+    try {
+        $sql->execute([
+            ':name' => $row['name'],
+            ':surname' => $row['surname'],
+            ':email' => $row['email'],
+        ]);
+    } catch (PDOException $e) {
+        echo "Error inserting '{$row['name']} {$row['surname']}': " . $e->getMessage() . "\n";
+        return false;
     }
 
-    echo "Insert complete: {$inserted} inserted, {$skipped} skipped.\n";
+    if ($sql->rowCount() === 0) {
+        echo "Skipped duplicate email: {$row['email']}\n";
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -265,8 +267,8 @@ function add_to_database(array $filedata, array $dboptions): void {
  * @return bool True if options are valid, false otherwise.
  */
 function valid_db_options(array $options): bool {
-    // Verify that the database connection options are valid.
-    if (empty($options['u']) || empty($options['p']) || empty($options['h'])) {
+    // Verify that the database connection options are provided.
+    if ($options['u'] === null || $options['p'] === null || $options['h'] === null) {
         return false;
     }
     return true;
