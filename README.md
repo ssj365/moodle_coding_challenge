@@ -57,3 +57,7 @@ php user_upload.php --file users.csv --dry_run
 php user_upload.php --help
 ```
 
+## Assumptions
+
+- The PostgreSQL database name matches the provided username.
+
