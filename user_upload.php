@@ -43,12 +43,14 @@ try {
 
     if (!empty($options['file'])) {
         process_csv_file($options);
+        exit(0);
     }
 } catch (Exception $e) {
     fwrite(STDERR, $e->getMessage() . PHP_EOL);
     exit(1);
 }
 
+echo $usage;
 exit(0);
 
 /**
@@ -215,7 +217,11 @@ function process_user_data(array $filedata, array $options): void {
     $pdo = db_connect($options);
 
     // Verify the users table exists before inserting.
-    $pdo->query('SELECT 1 FROM users LIMIT 1');
+    try {
+        $pdo->query('SELECT 1 FROM users LIMIT 1');
+    } catch (PDOException $e) {
+        throw new Exception("Error: Users table does not exist. Run --create_table first.");
+    }
 
     $sql = $pdo->prepare(
         'INSERT INTO users (name, surname, email) VALUES (:name, :surname, :email) ON CONFLICT (email) DO NOTHING'
