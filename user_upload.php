@@ -107,7 +107,10 @@ function process_csv_file(array $options): void {
 
     if (!is_file($filename) || !is_readable($filename) ||
         strtolower(pathinfo($filename, PATHINFO_EXTENSION)) !== 'csv') {
-        throw new Exception("Error: File '{$filename}' is not a readable CSV file. Check CSV file exists and has the correct permissions.");
+        throw new Exception(
+            "Error: File '{$filename}' is not a readable CSV file."
+            . " Check CSV file exists and has the correct permissions."
+        );
     }
 
     // Before processing, normalize the names and emails.
@@ -130,7 +133,7 @@ function normalize_csv_data(string $filename): array {
 
     // Read and validate the header row.
     $header = fgetcsv($file);
-    if ($header === false) {
+    if ($header === false || $header === [null]) {
         fclose($file);
         throw new Exception("Error: CSV file is empty or unreadable.");
     }
