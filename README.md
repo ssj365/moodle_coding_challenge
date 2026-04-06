@@ -5,7 +5,7 @@ A command line PHP script that parses a CSV file of user data and inserts valid 
 ## Features
 
 - **CSV parsing** — Reads CSV files with `name`, `surname`, and `email` columns.
-- **Data normalisation** — Standardizes user data  before inserting into the database.
+- **Data normalisation** — Standardizes user data before inserting into the database.
 - **Validation** — Validates email format prior to database insertion.
 - **Dry run mode** — Preview parsed data without modifying the database.
 - **Database management** — Creates or rebuilds the PostgreSQL users table.
@@ -29,15 +29,9 @@ A command line PHP script that parses a CSV file of user data and inserts valid 
     cd moodle_coding_challenge
     ```
 
-2. Ensure `user_upload.php` and `users.csv` are in the same directory.
+2. The test CSV file `users.csv` is included in the repository.
 
 ## Running the Script
-
-Run from the directory containing the script and CSV file:
-
-```bash
-cd /path/to/moodle_coding_challenge
-```
 
 **Create the users table:**
 
